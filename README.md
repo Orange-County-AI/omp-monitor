@@ -8,7 +8,11 @@ This is the omp equivalent of Claude Code's `Monitor` tool, plus what a resident
 
 ## Install
 
-Pick one. The extension needs no build step and no environment variables.
+```sh
+git clone https://github.com/Orange-County-AI/omp-monitor.git
+```
+
+Then pick one. The extension needs no build step, no compile step, and no environment variables.
 
 ```jsonc
 // 1. Project or user settings — .omp/settings.json or ~/.omp/agent/settings.json
