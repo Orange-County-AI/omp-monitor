@@ -33,6 +33,21 @@ omp -e /abs/path/to/omp-monitor/src/index.ts
 
 Point `extensions` at the **entry file**, not the directory: a directory entry is scanned and `host.ts` / `monitor.ts` would be loaded as extensions in their own right.
 
+## `match` filters. `until` stops. Nothing else ends a monitor early
+
+The one thing worth reading twice, because it is the difference between a monitor
+that answers a question and one that keeps working forever:
+
+| | Delivers | Then |
+| --- | --- | --- |
+| `match: "^\\{"` | only lines matching the pattern | **keeps running.** Every later match is another delivery, indefinitely |
+| `until: "BUILD OK"` | the line matching the pattern | **ends**, with one terminal notice |
+
+A `match` hit is an *event to handle*, not a reason to stop. A resident listener —
+a chat bot, a queue consumer, a mailbox — wants `match` and no `deadline`: it then
+ends only when its source does. Use `until` when you are waiting for one thing to
+happen and have nothing more to do once it has.
+
 ## The two shapes
 
 Tail something until a thing happens, then stop:
@@ -41,7 +56,8 @@ Tail something until a thing happens, then stop:
 monitor { "file": "build.log", "until": "BUILD (OK|FAILED)" }
 ```
 
-Run a listener that stays up, and only hear about the lines you care about:
+Run a listener that stays up, and only hear about the lines you care about — this
+one delivers forever, once per matching line:
 
 ```jsonc
 monitor {
@@ -64,8 +80,8 @@ monitor {
 | `command`, `args` | Run this command and read its stdout and stderr |
 | `cwd` | Working directory for a command source. Defaults to the session's |
 | `env` | Environment overlay for a command source, merged over the inherited environment |
-| `match` | Regex. Deliver only matching lines; the monitor keeps running |
-| `until` | Regex. Deliver the matching line, then end the monitor |
+| `match` | Regex. Deliver only matching lines. **Does not end the monitor** — matches keep arriving |
+| `until` | Regex. Deliver the matching line, then **end** the monitor |
 | `deadline` | Seconds until the monitor ends on its own. Omit for a resident monitor |
 | `replay` | Deliver a file's existing content before live output |
 

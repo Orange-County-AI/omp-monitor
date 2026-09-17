@@ -77,6 +77,26 @@ check("both matches delivered", seen.flatMap(b => b.lines).length === 2, seen.fl
 check("monitor still live", registry.list().find(s => s.name === "chat")?.state === "monitoring");
 check("burst of 4 source lines cost one batch", seen.length === 1, seen.length);
 
+// A `match` monitor must keep delivering indefinitely — this is the resident
+// listener contract, where every matching line is a separate event to handle and
+// a filter hit must never be mistaken for a reason to stop.
+const chatBefore = batches.length;
+await fs.appendFile(chatPath, 'noise again\n{"event":"message","id":3}\n');
+await waitUntil(() => batches.length > chatBefore);
+await fs.appendFile(chatPath, '{"event":"message","id":4}\n');
+await waitUntil(() => batches.filter(b => b.name === "chat").flatMap(b => b.lines).length >= 4);
+const chatAll = batches.filter(b => b.name === "chat");
+check("later matches keep arriving", chatAll.flatMap(b => b.lines).length === 4, chatAll.flatMap(b => b.lines));
+check("each later match is its own delivery", chatAll.length >= 3, chatAll.length);
+check("no match ever ended the monitor", chatAll.every(b => b.ended === undefined), chatAll.map(b => b.ended));
+check("monitor still live after four matches", registry.list().find(s => s.name === "chat")?.state === "monitoring");
+check(
+	"until on the same source would end it, match does not",
+	registry.list().find(s => s.name === "build")?.endReason === "matched" &&
+		registry.list().find(s => s.name === "chat")?.endReason === undefined,
+	{ build: registry.list().find(s => s.name === "build")?.endReason, chat: registry.list().find(s => s.name === "chat")?.endReason },
+);
+
 // 3. Command source: resident until the command exits.
 seen = await run("command source delivers stdout and stderr, ends on exit", { name: "job", target: { kind: "command", command: "sh", args: ["-c", "echo one; echo two >&2; sleep 0.6; echo three; exit 3"], cwd: dir, env: {} }, replay: false }, async () => {
 	await waitUntil(() => batches.some(b => b.name === "job" && b.ended !== undefined));
