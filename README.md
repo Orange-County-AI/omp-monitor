@@ -72,20 +72,31 @@ monitor {
 
 ## Parameters
 
-| Field | Meaning |
-| --- | --- |
-| `op` | `start` (default), `list`, `stop` |
-| `name` | Monitor name. Defaults to a slug of the source. Required for `stop` |
-| `file` | Tail this file. Must already exist |
-| `command`, `args` | Run this command and read its stdout and stderr |
-| `cwd` | Working directory for a command source. Defaults to the session's |
-| `env` | Environment overlay for a command source, merged over the inherited environment |
-| `match` | Regex. Deliver only matching lines. **Does not end the monitor** — matches keep arriving |
-| `until` | Regex. Deliver the matching line, then **end** the monitor |
-| `deadline` | Seconds until the monitor ends on its own. Omit for a resident monitor |
-| `replay` | Deliver a file's existing content before live output |
+The **only** requirement is a source: exactly one of `file` or `command`. Every
+other field is optional, including both conditions. The smallest useful call is:
 
-Exactly one of `file` or `command` is required. `match` and `until` compose: `until` always delivers and always ends, whether or not it passes `match`.
+```jsonc
+monitor { "file": "app.log" }
+```
+
+That delivers every line of `app.log` as it is written, for as long as the file
+exists — no filter, no deadline, no end condition.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `file` | one of | Tail this file. Must already exist |
+| `command`, `args` | one of | Run this command and read its stdout and stderr |
+| `op` | no | `start` (default), `list`, `stop` |
+| `name` | for `stop` | Monitor name. Otherwise defaults to a slug of the source |
+| `cwd` | no | Working directory for a command source. Defaults to the session's |
+| `env` | no | Environment overlay for a command source, merged over the inherited environment |
+| `match` | no | Regex. Deliver only matching lines. **Does not end the monitor** — matches keep arriving. Omitted, every line is delivered |
+| `until` | no | Regex. Deliver the matching line, then **end** the monitor. Omitted, nothing ends it but its source |
+| `deadline` | no | Seconds until the monitor ends on its own. Omitted, it is resident |
+| `replay` | no | Deliver a file's existing content before live output. Defaults to `false`, i.e. start at the end of the file |
+
+`match` and `until` compose: `until` always delivers and always ends, whether or
+not the line passes `match`.
 
 `/monitor` lists this session's monitors; `/monitor stop <name>` ends one.
 

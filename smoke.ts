@@ -133,6 +133,21 @@ seen = await run("replay delivers existing content", { name: "old", target: { ki
 });
 check("existing content delivered", seen.flatMap(b => b.lines).includes("line from before the monitor"), seen.flatMap(b => b.lines));
 
+// The documented minimum call: a source and nothing else. No match, no until, no
+// deadline — every line delivered, monitor stays live.
+const barePath = path.join(dir, "bare.log");
+await Bun.write(barePath, "");
+seen = await run("a source with no conditions delivers everything and stays live", { name: "bare", target: { kind: "file", path: barePath }, replay: false }, async () => {
+	await Bun.sleep(300);
+	await fs.appendFile(barePath, "plain text line\n{\"json\":true}\n");
+	await waitUntil(() => batches.filter(b => b.name === "bare").flatMap(b => b.lines).length >= 2);
+	await fs.appendFile(barePath, "a later line\n");
+	await waitUntil(() => batches.filter(b => b.name === "bare").flatMap(b => b.lines).length >= 3);
+});
+check("unfiltered: every line delivered regardless of shape", seen.flatMap(b => b.lines).length === 3, seen.flatMap(b => b.lines));
+check("no condition ended it", seen.every(b => b.ended === undefined), seen.map(b => b.ended));
+check("still live with no until and no deadline", registry.list().find(s => s.name === "bare")?.state === "monitoring");
+
 // 7. A vanishing file ends the monitor.
 const doomedPath = path.join(dir, "doomed.log");
 await Bun.write(doomedPath, "");

@@ -38,14 +38,16 @@ const TOOL_DESCRIPTION = `Monitor a file or a command in the background and rece
 
 Each batch of lines is delivered into this conversation on its own; while you are idle a delivery wakes you, so you can start a monitor and keep working. Use it to tail a log until something appears, poll a job until its status changes, or run a resident listener whose every line is an event you must handle.
 
-Sources (exactly one):
-- \`file\`: tail a file that already exists. \`replay\` delivers what is already in it first.
+A source is the only required argument: exactly one of \`file\` or \`command\`. \`monitor { file: "app.log" }\` is a complete call — it delivers every line of that file, for as long as the file exists.
+- \`file\`: tail a file that already exists. \`replay\` delivers what is already in it first, otherwise reading starts at the end of the file.
 - \`command\` + \`args\`: run a command and read its stdout and stderr. \`env\` and \`cwd\` set its environment; pass credentials or config paths either way, whichever the command expects.
 
-Conditions:
-- \`until\`: a regex. The line matching it is delivered and the monitor ends. This is "tell me when X happens".
-- \`match\`: a regex. Only matching lines are delivered; the monitor keeps running. This is "tell me about X, ignore the rest".
+Conditions, all optional:
+- \`until\`: a regex. The line matching it is delivered and the monitor ends. This is "tell me when X happens". Omit it and nothing ends the monitor but its own source.
+- \`match\`: a regex. Only matching lines are delivered and the monitor KEEPS RUNNING — a match is an event to handle, never a reason to stop. This is "tell me about X, ignore the rest". Omit it and every line is delivered.
 - \`deadline\`: seconds until the monitor ends on its own. Omit it and the monitor lives as long as its source, which is what a resident listener wants.
+
+So: a resident listener is \`command\` plus an optional \`match\`, and nothing else. A one-shot wait is a source plus \`until\`.
 
 Every monitor that stops — matched, exited, deadline, or its file vanished — delivers exactly one notice saying so. Until that notice arrives the monitor is live and you need not check on it. Once it arrives, nothing from that source will reach you again until you start it.
 
