@@ -4,7 +4,7 @@ A generic long-poll / monitor tool for [omp](https://github.com/can1357/oh-my-pi
 
 It registers one tool, `monitor`. The agent points it at a file or a command; each batch of output that source produces is injected into the conversation. While the session is idle a delivery starts a turn; while the session is mid-turn the batch is injected at the next step boundary, so the agent reacts to the event while it works rather than after it finishes.
 
-This is the omp equivalent of Claude Code's `Monitor` tool, plus what a resident listener needs: no mandatory deadline, and an optional filter so a chatty source only wakes the agent for lines that matter.
+This is the omp equivalent of Claude Code's `Monitor` tool, plus what a resident listener needs: no mandatory deadline, an optional filter so a chatty source only wakes the agent for lines that matter, and [monitors a plugin declares](#monitors-a-plugin-declares) so a listener is armed at session start rather than whenever the agent remembers to ask.
 
 ## Install
 
