@@ -2,6 +2,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { discoverDeclared } from "./src/declared";
 import { formatBatch, formatStatus, formatStatusLine } from "./src/format";
 import { type MonitorBatch, MonitorRegistry, type MonitorSpec, type MonitorStatus, normalizeLabel } from "./src/monitor";
 
@@ -273,6 +274,89 @@ check("no monitors remain", registry.list().length === 0, registry.list());
 check("session teardown delivers no notices", batches.length === countBeforeStop, batches.length - countBeforeStop);
 check("child process killed", victimPid !== undefined && !isAlive(victimPid), victimPid);
 check("footer segment cleared with the session", formatStatusLine(registry.live()) === undefined, formatStatusLine(registry.live()));
+
+// 14. Declared monitors: what a plugin ships is discovered, scoped and gated.
+console.log("\n== declared monitors");
+const plugins = path.join(dir, "plugins");
+const mailbox = path.join(plugins, "mailbox-agents");
+await fs.mkdir(path.join(mailbox, "monitors"), { recursive: true });
+await Bun.write(
+	path.join(mailbox, "monitors", "monitors.json"),
+	JSON.stringify([
+		{
+			name: "mailbox-events",
+			command: '"${OMP_PLUGIN_ROOT}"/bin/watch --config "${MAILBOX_CONFIG}"',
+			description: "Mail for this account",
+			label: "mailbox",
+		},
+		{
+			name: "needs-identity",
+			command: 'watch --config "${MAILBOX_IDENTITY_THAT_IS_UNSET}"',
+			description: "A mailbox this machine does not consume",
+		},
+		{ name: "later", command: "watch", description: "Armed by a skill, not by session start", when: "on-skill-invoke:mail" },
+		{ name: "nameless-command", description: "No command at all" },
+	]),
+);
+
+// A Claude Code plugin directory, unmodified, is a valid source: the manifest
+// path and the inline key are the ones Claude Code itself documents.
+const inline = path.join(plugins, "claude-shaped");
+await fs.mkdir(path.join(inline, ".claude-plugin"), { recursive: true });
+await Bun.write(
+	path.join(inline, ".claude-plugin", "plugin.json"),
+	JSON.stringify({ name: "claude-shaped", experimental: { monitors: "./config/monitors.json" } }),
+);
+await fs.mkdir(path.join(inline, "config"), { recursive: true });
+await Bun.write(
+	path.join(inline, "config", "monitors.json"),
+	JSON.stringify([{ name: "queue", command: "poll-queue", description: "Queue depth", match: "^\\{" }]),
+);
+
+// A manifest may not reach out of its own tree.
+const escapee = path.join(plugins, "escapee");
+await fs.mkdir(path.join(escapee, ".omp-plugin"), { recursive: true });
+await Bun.write(path.join(escapee, ".omp-plugin", "plugin.json"), JSON.stringify({ monitors: "../mailbox-agents/monitors/monitors.json" }));
+
+const discovery = await discoverDeclared({
+	home: dir,
+	cwd: dir,
+	env: { OMP_MONITOR_PLUGIN_DIRS: plugins, MAILBOX_CONFIG: "/etc/mailbox.json" },
+});
+const declaredNames = discovery.monitors.map(monitor => monitor.name);
+const declaredMail = discovery.monitors.find(monitor => monitor.name === "mailbox-agents:mailbox-events");
+check("declared monitors are scoped by plugin", declaredNames.includes("mailbox-agents:mailbox-events"), declaredNames);
+check("a Claude-shaped manifest is read as-is", declaredNames.includes("claude-shaped:queue"), declaredNames);
+check(
+	"${OMP_PLUGIN_ROOT} and environment values are substituted",
+	declaredMail?.command === `"${mailbox}"/bin/watch --config "/etc/mailbox.json"`,
+	declaredMail?.command,
+);
+check("an unset variable gates its monitor instead of starting it", !declaredNames.includes("mailbox-agents:needs-identity"), declaredNames);
+check("a trigger this host cannot fire is not armed", !declaredNames.includes("mailbox-agents:later"), declaredNames);
+check("an entry without a command is skipped", !declaredNames.some(name => name.endsWith(":nameless-command")), declaredNames);
+check("a path outside the plugin root is refused", !declaredNames.some(name => name.startsWith("escapee:")), declaredNames);
+check(
+	"every skipped entry is reported",
+	["needs-identity", "later", "outside the plugin root"].every(fragment => discovery.warnings.some(warning => warning.includes(fragment))),
+	discovery.warnings,
+);
+
+// 15. A declared monitor runs through a shell and delivers, description intact.
+await Bun.write(path.join(dir, "declared.sh"), 'echo "declared line"\nsleep 5\n');
+const declaredSpec = declaredMail as NonNullable<typeof declaredMail>;
+const declaredStatus = await registry.start({
+	name: declaredSpec.name,
+	label: declaredSpec.label,
+	description: declaredSpec.description,
+	target: { kind: "command", command: "/bin/sh", args: ["-c", `sh ${path.join(dir, "declared.sh")}`], cwd: dir, env: {} },
+	replay: false,
+});
+await waitUntil(() => batches.some(b => b.name === declaredSpec.name && b.lines.includes("declared line")));
+check("a declared monitor delivers through the shell", batches.some(b => b.name === declaredSpec.name && b.lines.includes("declared line")));
+check("the footer shows the declared label", (formatStatusLine(registry.live()) ?? "").includes("mailbox"), formatStatusLine(registry.live()));
+check("list explains what it is watching", formatStatus(declaredStatus).includes("watching=Mail for this account"), formatStatus(declaredStatus));
+registry.stopAll("session-ended");
 
 function isAlive(pid: number): boolean {
 	try {

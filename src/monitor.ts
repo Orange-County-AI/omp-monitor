@@ -32,6 +32,12 @@ export interface MonitorSpec {
 	 * one is always {@link MonitorStatus.label}.
 	 */
 	label?: string;
+	/**
+	 * Why this monitor exists, in a few words. A declared monitor carries its
+	 * manifest's `description`; one the agent started needs none, because the
+	 * call that started it is in the transcript.
+	 */
+	description?: string;
 	target: MonitorTarget;
 	/** Deliver only lines matching this pattern; absent delivers every line. */
 	match?: string;
@@ -47,6 +53,7 @@ export interface MonitorStatus {
 	name: string;
 	/** What the status footer calls this monitor now, normalized. */
 	label?: string;
+	description?: string;
 	source: string;
 	state: "monitoring" | "ended";
 	match?: string;
@@ -155,6 +162,7 @@ class Monitor {
 			// Normalized here rather than at the tool boundary, so the stored label
 			// is footer-safe whoever built the spec.
 			label: spec.label === undefined ? undefined : normalizeLabel(spec.label),
+			description: spec.description,
 			source: this.source,
 			state: "monitoring",
 			match: spec.match,

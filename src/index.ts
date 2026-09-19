@@ -25,6 +25,7 @@
  * background daemon and nothing to install beyond this extension.
  */
 
+import { AUTOSTART_ENV, type DeclaredMonitor, discoverDeclared } from "./declared";
 import { formatBatch, formatStatus, formatStatusLine } from "./format";
 import type { ExtensionApi, ExtensionCtx, ToolDefinition, ToolResult } from "./host";
 import { type MonitorBatch, MonitorRegistry, type MonitorSpec, type MonitorStatus, type MonitorTarget } from "./monitor";
@@ -123,6 +124,8 @@ function resolveDeadlineMs(deadline: number | undefined): number | undefined {
 export default function ompMonitor(pi: ExtensionApi): void {
 	let registry: MonitorRegistry | undefined;
 	let statusCtx: ExtensionCtx | undefined;
+	/** Declarations seen and not armed, reprinted by `/monitor`. */
+	let declaredWarnings: string[] = [];
 
 	const publishStatus = (): void => {
 		if (!statusCtx?.hasUI) return;
@@ -242,6 +245,60 @@ export default function ompMonitor(pi: ExtensionApi): void {
 	pi.setLabel("Monitor");
 	pi.registerTool(tool);
 
+	/**
+	 * Declared monitors are armed once per session, at the point a session
+	 * exists: `session_start` for a fresh or resumed one, `session_switch` for
+	 * the next one in the same process. A declaration is a command that runs
+	 * unasked, so this happens only where there is a UI — a `-p` run and every
+	 * subagent get the tool and none of the arming.
+	 */
+	const armDeclared = async (ctx: ExtensionCtx): Promise<void> => {
+		statusCtx = ctx;
+		const autostart = process.env[AUTOSTART_ENV] ?? "on";
+		if (!ctx.hasUI || autostart === "0" || autostart === "false" || autostart === "off") return;
+		const { monitors, warnings } = await discoverDeclared({
+			home: process.env.HOME ?? "",
+			env: process.env,
+			cwd: ctx.cwd,
+		});
+		// Seen and not armed: a missing identity variable, a trigger this host
+		// cannot fire, a malformed entry. `/monitor` reprints them, because the
+		// difference between "nothing declared" and "declared and skipped" is
+		// the difference between a quiet mailbox and a deaf one.
+		declaredWarnings = warnings;
+		for (const warning of warnings) pi.logger?.warn?.(warning);
+		for (const declared of monitors) await armOne(declared, ctx);
+	};
+
+	const armOne = async (declared: DeclaredMonitor, ctx: ExtensionCtx): Promise<void> => {
+		const spec: MonitorSpec = {
+			name: declared.name,
+			label: declared.label ?? declared.name.split(":").pop(),
+			description: declared.description,
+			target: {
+				kind: "command",
+				// Through a shell, because a declaration is one command STRING —
+				// the shape Claude Code's monitors.json uses, and what lets a
+				// manifest quote a path with spaces in it.
+				command: "/bin/sh",
+				args: ["-c", declared.command],
+				cwd: ctx.cwd,
+				env: {},
+			},
+			match: declared.match,
+			replay: false,
+		};
+		try {
+			await ensureRegistry(ctx).start(spec);
+			publishStatus();
+		} catch (error) {
+			// One plugin's broken declaration must not stop the next plugin's
+			// listener from coming up.
+			pi.logger?.warn?.("Failed to arm declared monitor", { name: declared.name, origin: declared.origin, error: String(error) });
+			declaredWarnings = [...declaredWarnings, `[monitor] ${declared.name} from ${declared.origin} failed to start: ${String(error)}`];
+		}
+	};
+
 	pi.registerCommand("monitor", {
 		description: "List, relabel, or stop this session's monitors",
 		handler: (args, ctx) => {
@@ -259,7 +316,8 @@ export default function ompMonitor(pi: ExtensionApi): void {
 				return `Relabelled ${formatStatus(status)}`;
 			}
 			const statuses = live.list();
-			return statuses.length === 0 ? "No monitors in this session." : statuses.map(formatStatus).join("\n");
+			const lines = statuses.length === 0 ? ["No monitors in this session."] : statuses.map(formatStatus);
+			return [...lines, ...declaredWarnings].join("\n");
 		},
 	});
 
@@ -270,9 +328,16 @@ export default function ompMonitor(pi: ExtensionApi): void {
 		statusCtx = ctx;
 		registry?.stopAll("session-ended");
 		registry = undefined;
+		declaredWarnings = [];
 		publishStatus();
 	};
-	pi.on("session_switch", release);
+	pi.on("session_start", async (_event, ctx) => {
+		await armDeclared(ctx as ExtensionCtx);
+	});
+	pi.on("session_switch", async (event, ctx) => {
+		release(event, ctx as ExtensionCtx);
+		await armDeclared(ctx as ExtensionCtx);
+	});
 	pi.on("session_shutdown", release);
 }
 

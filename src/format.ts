@@ -116,6 +116,7 @@ export function formatStatus(status: MonitorStatus): string {
 	return [
 		`${status.name}: ${describeState(status)}`,
 		status.label === undefined ? undefined : `label=${status.label}`,
+		status.description === undefined ? undefined : `watching=${status.description}`,
 		`source=${status.source}`,
 		...filters,
 		counts,

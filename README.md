@@ -169,7 +169,48 @@ monitor { "name": "mm-fleet-manager", "command": "…", "env": { "MATTERMOST_AGE
 monitor { "name": "mm-orchestrator",  "command": "…", "args": ["--config", "/abs/profiles/orchestrator.json", "watch"] }
 ```
 
-Nothing is armed until the agent calls the tool, so a session is not a consumer of anything until you tell it to be.
+A session arms its own monitors from its own environment, which is what makes two agents in one directory workable: same declaration, different `MATTERMOST_AGENT_CONFIG`, two listeners that never see each other's mail. Nothing is armed until the agent calls the tool — or until a plugin declares one, below.
+
+## Monitors a plugin declares
+
+A resident listener has a bootstrap problem the tool cannot solve on its own: the agent has to call `monitor` before anything is delivered, and a session that never makes the call is deaf while posts pile up unread. So a plugin can ship the declaration, and this extension arms it at session start — the same component Claude Code has, with the same file, the same field names and the same defaults, so one plugin directory serves both harnesses.
+
+`monitors/monitors.json` in the plugin root:
+
+```json
+[
+  {
+    "name": "mailbox",
+    "command": "\"${OMP_PLUGIN_ROOT}\"/bin/mattermost-monitor",
+    "description": "Mattermost messages in the configured channels",
+    "label": "mattermost inbox"
+  }
+]
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | yes | Unique within the plugin. Armed as `plugin:name`, the way omp scopes every other plugin component |
+| `command` | yes | One shell command string, run in the session's working directory for the life of the session |
+| `description` | yes | What is being watched. `/monitor` prints it as `watching=…` |
+| `when` | no | `"always"` (the default) arms at session start. Claude Code's `"on-skill-invoke:<skill>"` is recognised and **not** armed here: omp gives an extension no skill-dispatch hook, and `/monitor` says so rather than pretending |
+| `label` | no | Status-footer text; omp-specific, defaults to the entry name |
+| `match` | no | Deliver only matching lines; omp-specific, and what lets a chatty source be declared at all |
+
+Declarations are also read from `monitors` or `experimental.monitors` in `.omp-plugin/plugin.json`, `.claude-plugin/plugin.json` or `package.json` (`omp.monitors`), either as the array itself or as a path to it, which must stay inside the plugin.
+
+`${OMP_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` both expand to the plugin directory, `${OMP_PROJECT_DIR}` and `${CLAUDE_PROJECT_DIR}` to the session's working directory, and any other `${VAR}` to that variable in the session's environment.
+
+**An unset variable does not expand to nothing — it withholds the monitor**, with one line in `/monitor` saying which variable was missing. That is how a declaration stays conditional: a mailbox listener pinned to `${MATTERMOST_AGENT_CONFIG}` arms itself on the machines that have an identity and stays silent on the ones that do not, instead of starting a command that fails on every session.
+
+Where they are read from is omp's own plugin surface, user scope only:
+
+- `~/.omp/agent/extensions/<plugin>/` — a dropped or symlinked package
+- `~/.omp/plugins/node_modules/<plugin>/` — `omp plugin install` and `omp plugin link`, plus the `$XDG_DATA_HOME` equivalent
+
+Two limits are deliberate, and both match Claude Code. **Nothing is read from the project directory**, because a monitor is a command that runs unasked and a checkout must not be able to arm one. And **arming happens only in an interactive session**, so a `-p` run and every subagent get the tool without the listener — one listener per human session, not one per spawned turn. `OMP_MONITOR_AUTOSTART=0` turns the whole mechanism off; `OMP_MONITOR_PLUGIN_DIRS=/a:/b` replaces the search path.
+
+A declared monitor is an ordinary monitor once armed: `/monitor` lists it, `op: "stop"` ends it, and it dies with its session. If two plugins declare the same scoped name the first wins and the second is reported, so a reload or a second install cannot double-start a listener.
 
 ## Verify
 
@@ -177,7 +218,7 @@ Nothing is armed until the agent calls the tool, so a session is not a consumer 
 bun smoke.ts
 ```
 
-Drives the engine against real files and a real child process: filtering, `until`, deadlines, replay, exit codes, env overlay, a deleted source, a 120-line burst, envelope escaping, status-line labelling and relabelling, and child termination on teardown.
+Drives the engine against real files and a real child process: filtering, `until`, deadlines, replay, exit codes, env overlay, a deleted source, a 120-line burst, envelope escaping, status-line labelling and relabelling, child termination on teardown, and declaration discovery — plugin scoping, Claude-shaped manifests, variable substitution, the unset-variable gate, the path-escape refusal and the shell-run delivery.
 
 ## Limits
 
