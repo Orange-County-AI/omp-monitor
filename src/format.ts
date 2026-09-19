@@ -8,6 +8,7 @@
  * notice that the monitor ended.
  */
 
+import { normalizeLabel } from "./monitor";
 import type { MonitorBatch, MonitorEndReason, MonitorStatus } from "./monitor";
 
 /**
@@ -33,6 +34,31 @@ function attribute(value: string): string {
  */
 function text(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Characters of labels the footer spends before the remainder becomes a count. */
+const MAX_STATUS_CHARS = 48;
+
+/**
+ * The status footer segment: how many monitors are live and which ones. Names
+ * are listed until the character budget is spent, and the rest become `+N`, so
+ * a session with a dozen monitors still leaves room for every other segment.
+ */
+export function formatStatusLine(live: MonitorStatus[]): string | undefined {
+	if (live.length === 0) return undefined;
+	const shown: string[] = [];
+	let width = 0;
+	for (const status of live) {
+		// The label is already normalized; a name is agent-supplied too and is not.
+		const label = normalizeLabel(status.label ?? status.name) ?? "monitor";
+		const cost = shown.length === 0 ? label.length : label.length + 2;
+		if (shown.length > 0 && width + cost > MAX_STATUS_CHARS) break;
+		shown.push(label);
+		width += cost;
+	}
+	const hidden = live.length - shown.length;
+	if (hidden > 0) shown.push(`+${hidden}`);
+	return `monitor ${live.length}: ${shown.join(", ")}`;
 }
 
 /** What the agent should do about a monitor that stopped. */
@@ -89,6 +115,7 @@ export function formatStatus(status: MonitorStatus): string {
 	const counts = `${status.lines} line(s) in ${status.batches} batch(es)${status.dropped > 0 ? `, ${status.dropped} dropped` : ""}`;
 	return [
 		`${status.name}: ${describeState(status)}`,
+		status.label === undefined ? undefined : `label=${status.label}`,
 		`source=${status.source}`,
 		...filters,
 		counts,

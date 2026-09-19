@@ -25,7 +25,7 @@
  * background daemon and nothing to install beyond this extension.
  */
 
-import { formatBatch, formatStatus } from "./format";
+import { formatBatch, formatStatus, formatStatusLine } from "./format";
 import type { ExtensionApi, ExtensionCtx, ToolDefinition, ToolResult } from "./host";
 import { type MonitorBatch, MonitorRegistry, type MonitorSpec, type MonitorStatus, type MonitorTarget } from "./monitor";
 
@@ -49,13 +49,18 @@ Conditions, all optional:
 
 So: a resident listener is \`command\` plus an optional \`match\`, and nothing else. A one-shot wait is a source plus \`until\`.
 
+\`label\` is what this monitor is called in the status line the person you are working with is watching — a few words naming what it is waiting for, like "deploy prod" or "mailbox". Omitted, the status line shows \`name\`, which is an identifier and may be an auto-derived slug. A label is cosmetic: it never affects delivery.
+
+A label is not fixed at start. \`op: "label"\` with \`name\` and \`label\` renames a monitor that is already running, so a long-lived one can say what it is doing now — "deploy prod: waiting on rollout" then "deploy prod: smoke tests" — rather than what it was started for. Pass \`label: ""\` to clear it and fall back to \`name\`.
+
 Every monitor that stops — matched, exited, deadline, or its file vanished — delivers exactly one notice saying so. Until that notice arrives the monitor is live and you need not check on it. Once it arrives, nothing from that source will reach you again until you start it.
 
-\`op: "list"\` shows this session's monitors; \`op: "stop"\` ends one.`;
+\`op: "list"\` shows this session's monitors; \`op: "stop"\` ends one; \`op: "label"\` renames one.`;
 
 interface MonitorParams {
-	op?: "start" | "list" | "stop";
+	op?: "start" | "list" | "stop" | "label";
 	name?: string;
+	label?: string;
 	file?: string;
 	command?: string;
 	args?: string[];
@@ -121,8 +126,7 @@ export default function ompMonitor(pi: ExtensionApi): void {
 
 	const publishStatus = (): void => {
 		if (!statusCtx?.hasUI) return;
-		const live = registry?.live() ?? [];
-		statusCtx.ui.setStatus(STATUS_KEY, live.length === 0 ? undefined : `monitor ${live.length}`);
+		statusCtx.ui.setStatus(STATUS_KEY, formatStatusLine(registry?.live() ?? []));
 	};
 
 	const deliver = (batch: MonitorBatch): void => {
@@ -169,6 +173,7 @@ export default function ompMonitor(pi: ExtensionApi): void {
 		const target = resolveTarget(params, ctx.cwd);
 		const spec: MonitorSpec = {
 			name: params.name ?? defaultName(target),
+			label: params.label,
 			target,
 			match: params.match,
 			until: params.until,
@@ -192,8 +197,9 @@ export default function ompMonitor(pi: ExtensionApi): void {
 		// exactly the authority bash already carries.
 		approval: "exec",
 		parameters: pi.arktype({
-			"op?": "'start' | 'list' | 'stop'",
+			"op?": "'start' | 'list' | 'stop' | 'label'",
 			"name?": "string",
+			"label?": "string",
 			"file?": "string",
 			"command?": "string",
 			"args?": "string[]",
@@ -220,6 +226,13 @@ export default function ompMonitor(pi: ExtensionApi): void {
 					publishStatus();
 					return textResult(`Stopped ${formatStatus(status)}`, status);
 				}
+				case "label": {
+					if (!params.name) throw new Error("label requires name");
+					if (params.label === undefined) throw new Error('label requires label; pass "" to clear it');
+					const status = ensureRegistry(ctx).relabel(params.name, params.label);
+					publishStatus();
+					return textResult(`Relabelled ${formatStatus(status)}`, status);
+				}
 				default:
 					return start(params, ctx);
 			}
@@ -230,14 +243,20 @@ export default function ompMonitor(pi: ExtensionApi): void {
 	pi.registerTool(tool);
 
 	pi.registerCommand("monitor", {
-		description: "List or stop this session's monitors",
+		description: "List, relabel, or stop this session's monitors",
 		handler: (args, ctx) => {
-			const [verb, name] = args.trim().split(/\s+/);
+			const [verb, name, ...rest] = args.trim().split(/\s+/);
 			const live = ensureRegistry(ctx);
 			if (verb === "stop" && name) {
 				const status = live.stop(name);
 				publishStatus();
 				return `Stopped ${formatStatus(status)}`;
+			}
+			if (verb === "label" && name) {
+				// No text left is a deliberate clear: the footer falls back to the name.
+				const status = live.relabel(name, rest.join(" "));
+				publishStatus();
+				return `Relabelled ${formatStatus(status)}`;
 			}
 			const statuses = live.list();
 			return statuses.length === 0 ? "No monitors in this session." : statuses.map(formatStatus).join("\n");

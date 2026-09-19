@@ -2,8 +2,8 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatBatch } from "./src/format";
-import { type MonitorBatch, MonitorRegistry, type MonitorSpec } from "./src/monitor";
+import { formatBatch, formatStatus, formatStatusLine } from "./src/format";
+import { type MonitorBatch, MonitorRegistry, type MonitorSpec, type MonitorStatus, normalizeLabel } from "./src/monitor";
 
 const batches: MonitorBatch[] = [];
 const registry = new MonitorRegistry({
@@ -36,6 +36,11 @@ function check(label: string, ok: boolean, detail?: unknown): void {
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline && !predicate()) await Bun.sleep(50);
+}
+
+/** A status with nothing live behind it, for the footer's own arithmetic. */
+function fakeStatus(name: string, label?: string): MonitorStatus {
+	return { name, label, source: "/tmp/x", state: "monitoring", startedAt: Date.now(), lines: 0, batches: 0, dropped: 0 };
 }
 
 async function run(label: string, spec: MonitorSpec, drive: () => Promise<void>): Promise<MonitorBatch[]> {
@@ -203,7 +208,61 @@ check("every line eventually delivered", burstLines.length === 120, burstLines.l
 check("no batch exceeded the cap", seen.every(b => b.lines.length <= 50), seen.map(b => b.lines.length));
 check("nothing dropped at this volume", seen.every(b => b.dropped === 0));
 
-// 12. stopAll leaves nothing running and kills the child.
+// 12. Labels: what the status footer says about the monitors that are live.
+console.log("\n== label and status line");
+const labelPath = path.join(dir, "deploy.log");
+await Bun.write(labelPath, "");
+const labelled = await registry.start({ name: "deploy-watch", label: "deploy prod", target: { kind: "file", path: labelPath }, replay: false });
+check("label kept on the status", labelled.label === "deploy prod", labelled.label);
+check("label shown when listing monitors", formatStatus(labelled).includes("label=deploy prod"), formatStatus(labelled));
+const liveLine = formatStatusLine(registry.live()) ?? "";
+check("footer names the labelled monitor", liveLine.includes("deploy prod"), liveLine);
+check("footer counts every live monitor", liveLine.startsWith(`monitor ${registry.live().length}:`), liveLine);
+
+const blankPath = path.join(dir, "blank.log");
+await Bun.write(blankPath, "");
+const blank = await registry.start({ name: "blank-label", label: "  \n ", target: { kind: "file", path: blankPath }, replay: false });
+check("a blank label is no label, not a failed start", blank.label === undefined, blank.label);
+check("an unlabelled monitor falls back to its name", formatStatusLine([fakeStatus("mm-fleet-manager")]) === "monitor 1: mm-fleet-manager");
+
+// The footer is written to the terminal unescaped, so a label is sanitized like
+// any other agent-supplied text and can never be more than one line of it.
+const hostileLine = formatStatusLine([fakeStatus("x", "\u001b[31mred\nline\u0007")]) ?? "";
+check("control bytes and newlines stripped from a label", hostileLine === "monitor 1: red line", hostileLine);
+check("overlong label truncated", (normalizeLabel("y".repeat(200)) ?? "").length === 24, normalizeLabel("y".repeat(200)));
+
+const many = formatStatusLine(Array.from({ length: 9 }, (_, i) => fakeStatus(`watcher-number-${i}`))) ?? "";
+check("footer elides past its budget rather than growing", many.includes("+"), many);
+check("footer stays one short segment", many.length <= 72, many.length);
+check("every live monitor still counted when elided", many.startsWith("monitor 9:"), many);
+check("no monitors means no footer segment", formatStatusLine([]) === undefined);
+
+// Relabelling a monitor that is already running: the footer follows, and
+// delivery is untouched — the monitor is still the same live source.
+const renamed = registry.relabel("deploy-watch", "deploy prod: smoke tests");
+check("relabel replaces the label", renamed.label === "deploy prod: smoke tests", renamed.label);
+// Against this one status rather than every live monitor: the footer's budget
+// legitimately elides a sixth name, which would make this assert the budget.
+check("footer follows the new label", formatStatusLine([renamed]) === "monitor 1: deploy prod: smoke tests", formatStatusLine([renamed]));
+check("relabel does not restart or end the monitor", renamed.state === "monitoring" && renamed.startedAt === labelled.startedAt, renamed);
+const deliveredBefore = batches.length;
+await fs.appendFile(labelPath, "still delivering\n");
+await waitUntil(() => batches.some(b => b.name === "deploy-watch" && b.lines.includes("still delivering")));
+check("a relabelled monitor keeps delivering", batches.length > deliveredBefore, batches.length - deliveredBefore);
+check("relabel is sanitized like a starting label", registry.relabel("deploy-watch", "\u001b[31mtail\tend").label === "tail end", registry.list().find(s => s.name === "deploy-watch")?.label);
+const cleared = registry.relabel("deploy-watch", "  ");
+check("blank relabel clears back to the name", cleared.label === undefined, cleared.label);
+check("cleared label means the footer shows the name", formatStatusLine([cleared]) === "monitor 1: deploy-watch", formatStatusLine([cleared]));
+
+let relabelError: string | undefined;
+try {
+	registry.relabel("no-such-monitor", "whatever");
+} catch (error) {
+	relabelError = String(error);
+}
+check("relabelling an unknown monitor is rejected", relabelError?.includes("Unknown monitor") === true, relabelError);
+
+// 13. stopAll leaves nothing running and kills the child.
 await registry.start({ name: "victim", target: { kind: "command", command: "sh", args: ["-c", "while true; do echo tick; sleep 0.2; done"], cwd: dir, env: {} }, replay: false });
 await waitUntil(() => batches.some(b => b.name === "victim" && b.lines.length > 0));
 const victimPid = registry.list().find(s => s.name === "victim")?.pid;
@@ -213,6 +272,7 @@ await Bun.sleep(700);
 check("no monitors remain", registry.list().length === 0, registry.list());
 check("session teardown delivers no notices", batches.length === countBeforeStop, batches.length - countBeforeStop);
 check("child process killed", victimPid !== undefined && !isAlive(victimPid), victimPid);
+check("footer segment cleared with the session", formatStatusLine(registry.live()) === undefined, formatStatusLine(registry.live()));
 
 function isAlive(pid: number): boolean {
 	try {

@@ -25,6 +25,13 @@ export type MonitorTarget =
 
 export interface MonitorSpec {
 	name: string;
+	/**
+	 * Short human-facing name for the status footer. Absent falls back to
+	 * {@link name}, which is an identifier and may be an auto-derived slug. This
+	 * is the label the monitor STARTS with; `relabel` moves it on, so the current
+	 * one is always {@link MonitorStatus.label}.
+	 */
+	label?: string;
 	target: MonitorTarget;
 	/** Deliver only lines matching this pattern; absent delivers every line. */
 	match?: string;
@@ -38,6 +45,8 @@ export interface MonitorSpec {
 
 export interface MonitorStatus {
 	name: string;
+	/** What the status footer calls this monitor now, normalized. */
+	label?: string;
 	source: string;
 	state: "monitoring" | "ended";
 	match?: string;
@@ -85,22 +94,37 @@ const MAX_BATCH_LINES = 50;
 const MAX_QUEUED_LINES = 500;
 const MAX_LINE_CHARS = 4_000;
 const READ_BYTES = 1024 * 1024;
+/** Longest label kept, so one monitor cannot crowd the rest out of the status footer. */
+const MAX_LABEL_CHARS = 24;
 
 export function describeTarget(target: MonitorTarget): string {
 	return target.kind === "file" ? target.path : [target.command, ...target.args].join(" ");
 }
 
 /**
- * Strip the control bytes that would corrupt the terminal when a delivered line
- * is rendered, keeping the printable text. A monitored log may be a PTY capture
- * full of cursor movement and colour, and none of that survives usefully as a
- * line of text in a conversation.
+ * Strip the control bytes that would corrupt the terminal when delivered text is
+ * rendered, keeping the printable characters. A monitored log may be a PTY
+ * capture full of cursor movement and colour, and none of that survives usefully
+ * as a line of text in a conversation — nor as a label in the status footer,
+ * which is written to the terminal unescaped.
  */
-function sanitize(text: string): string {
+export function sanitize(text: string): string {
 	return text
 		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
 		.replace(/\x1b[[\]()#;?]*[0-9;]*[A-Za-z]/g, "")
 		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
+/**
+ * Shape a label into something a one-line status footer can carry: control
+ * bytes stripped, whitespace collapsed to single spaces, and a hard length cap.
+ * Undefined when nothing visible is left, which is how a blank label means "no
+ * label" rather than failing the call that set it.
+ */
+export function normalizeLabel(label: string): string | undefined {
+	const clean = sanitize(label).replace(/\s+/gu, " ").trim();
+	if (clean.length === 0) return undefined;
+	return clean.length > MAX_LABEL_CHARS ? `${clean.slice(0, MAX_LABEL_CHARS - 1)}…` : clean;
 }
 
 class Monitor {
@@ -128,6 +152,9 @@ class Monitor {
 		this.#until = spec.until === undefined ? undefined : new RegExp(spec.until, "u");
 		this.#status = {
 			name: spec.name,
+			// Normalized here rather than at the tool boundary, so the stored label
+			// is footer-safe whoever built the spec.
+			label: spec.label === undefined ? undefined : normalizeLabel(spec.label),
 			source: this.source,
 			state: "monitoring",
 			match: spec.match,
@@ -142,6 +169,15 @@ class Monitor {
 
 	status(): MonitorStatus {
 		return { ...this.#status };
+	}
+
+	/**
+	 * Move what the status footer calls this monitor. Blank clears the label, so
+	 * the footer falls back to the name — that is how a label is removed, since
+	 * a monitor cannot be restarted to drop one.
+	 */
+	relabel(label: string): void {
+		this.#status.label = normalizeLabel(label);
 	}
 
 	/** Attach to the source. Throws when the source cannot be reached, so the tool call fails loudly. */
@@ -358,13 +394,25 @@ export class MonitorRegistry {
 		return monitor.status();
 	}
 
-	stop(name: string): MonitorStatus {
+	#require(name: string): Monitor {
 		const monitor = this.#monitors.get(name);
 		if (!monitor) {
 			const names = [...this.#monitors.keys()];
 			throw new Error(`Unknown monitor ${name}${names.length ? `. Running: ${names.join(", ")}` : ""}`);
 		}
+		return monitor;
+	}
+
+	stop(name: string): MonitorStatus {
+		const monitor = this.#require(name);
 		monitor.end("stopped", false);
+		return monitor.status();
+	}
+
+	/** Change what the status footer calls a monitor. Blank clears it back to the name. */
+	relabel(name: string, label: string): MonitorStatus {
+		const monitor = this.#require(name);
+		monitor.relabel(label);
 		return monitor.status();
 	}
 

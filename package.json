@@ -1,6 +1,6 @@
 {
 	"name": "omp-monitor",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"description": "A generic long-poll / monitor tool for omp: monitor a file or a command and wake the session when it has something to say",
 	"license": "MIT",

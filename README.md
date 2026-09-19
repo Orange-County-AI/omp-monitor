@@ -62,6 +62,7 @@ one delivers forever, once per matching line:
 ```jsonc
 monitor {
 	"name": "mm-fleet-manager",
+	"label": "fleet mailbox",
 	"command": "bun",
 	"args": ["/abs/path/to/agent/cli.ts", "--config", "/abs/profiles/fleet-manager.json", "watch"],
 	"match": "^\\{"
@@ -86,8 +87,9 @@ exists — no filter, no deadline, no end condition.
 | --- | --- | --- |
 | `file` | one of | Tail this file. Must already exist |
 | `command`, `args` | one of | Run this command and read its stdout and stderr |
-| `op` | no | `start` (default), `list`, `stop` |
-| `name` | for `stop` | Monitor name. Otherwise defaults to a slug of the source |
+| `op` | no | `start` (default), `list`, `stop`, `label` |
+| `name` | for `stop`, `label` | Monitor name. Otherwise defaults to a slug of the source |
+| `label` | no | A few words naming what this monitor is for, shown in the status line. Omitted, the status line shows `name` |
 | `cwd` | no | Working directory for a command source. Defaults to the session's |
 | `env` | no | Environment overlay for a command source, merged over the inherited environment |
 | `match` | no | Regex. Deliver only matching lines. **Does not end the monitor** — matches keep arriving. Omitted, every line is delivered |
@@ -98,7 +100,38 @@ exists — no filter, no deadline, no end condition.
 `match` and `until` compose: `until` always delivers and always ends, whether or
 not the line passes `match`.
 
-`/monitor` lists this session's monitors; `/monitor stop <name>` ends one.
+`/monitor` lists this session's monitors; `/monitor stop <name>` ends one;
+`/monitor label <name> <text…>` renames one, and with no text clears its label.
+
+## The status line
+
+Live monitors occupy one segment of omp's status footer, and a `label` is what
+the monitor is called there — so the person watching sees what the agent is
+waiting on, not just how many things it is waiting on:
+
+```
+monitor 3: deploy prod, mailbox, waiting on the nightl…
+```
+
+Unlabelled monitors fall back to their `name`. Labels are listed until the
+segment's character budget is spent and the rest become `+N`, so a session with
+a dozen monitors still leaves room for every other segment. A label is cosmetic:
+it never affects delivery, it is capped at 24 characters, and control bytes and
+newlines are stripped, because the footer is written to the terminal unescaped.
+The segment disappears when the last monitor ends.
+
+A label is not fixed at start. `op: "label"` with `name` and `label` renames a
+monitor that is already running, so a resident one can say what it is doing now
+rather than what it was started for, and `label: ""` clears it back to the name:
+
+```jsonc
+monitor { "name": "deploy", "file": "deploy.log", "label": "deploy prod: rollout" }
+monitor { "op": "label", "name": "deploy", "label": "deploy prod: smoke" }
+monitor { "op": "label", "name": "deploy", "label": "" }
+```
+
+Relabelling touches the footer and nothing else: the monitor is not restarted,
+its source, filters and deadline are untouched, and no delivery is interrupted.
 
 ## What the agent sees
 
@@ -144,7 +177,7 @@ Nothing is armed until the agent calls the tool, so a session is not a consumer 
 bun smoke.ts
 ```
 
-Drives the engine against real files and a real child process: filtering, `until`, deadlines, replay, exit codes, env overlay, a deleted source, a 120-line burst, envelope escaping, and child termination on teardown.
+Drives the engine against real files and a real child process: filtering, `until`, deadlines, replay, exit codes, env overlay, a deleted source, a 120-line burst, envelope escaping, status-line labelling and relabelling, and child termination on teardown.
 
 ## Limits
 
